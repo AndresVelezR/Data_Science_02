@@ -1,7 +1,7 @@
 # =============================================================
 #  ANÁLISIS DE MONITOREO AMBIENTAL
-#  Dashboard didáctico + tutor de IA (Groq) que interpreta
-#  cada gráfico y responde preguntas de estadística.
+#  Dashboard didáctico + tutor de IA (Groq), con panel lateral
+#  de filtros de datos y parámetros del modelo.
 #
 #  Para ejecutar, en la terminal:  streamlit run app.py
 # =============================================================
@@ -29,22 +29,46 @@ load_dotenv()  # lee GEMINI_API_KEY desde el archivo .env en local
 # proyecto, pero aquí guarda una clave de Groq, no de Google.
 API_KEY = os.getenv("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY", None)
 
-MODELO_IA = "llama-3.3-70b-versatile"  # buen balance calidad/velocidad en la capa gratuita de Groq
+# Modelos ofrecidos al usuario. Se excluyen a propósito llama-3.1-8b-instant
+# y llama-3.3-70b-versatile: Groq anunció su apagado para el 16 de agosto
+# de 2026, así que no tiene sentido dejarlos como opción por defecto.
+MODELOS = {
+    "openai/gpt-oss-20b": {
+        "etiqueta": "GPT-OSS 20B — rápido y liviano (recomendado)",
+        "rpd": "1,000 solicitudes/día gratis",
+    },
+    "openai/gpt-oss-120b": {
+        "etiqueta": "GPT-OSS 120B — más potente, razona mejor",
+        "rpd": "1,000 solicitudes/día gratis",
+    },
+    "qwen/qwen3.6-27b": {
+        "etiqueta": "Qwen 3.6 27B — alternativa",
+        "rpd": "1,000 solicitudes/día gratis",
+    },
+}
 
-SYSTEM_PROMPT = """
-Eres un tutor de estadística que le enseña a un principiante total a leer un dashboard
-de monitoreo ambiental. La persona no sabe qué es una media, una correlación ni un boxplot.
+# Cómo cambia el nivel de detalle según lo que elija el usuario en el panel.
+NIVEL_INSTRUCCIONES = {
+    "Muy simple": "Explica como si hablaras con alguien de 12 años. Evita cualquier "
+                  "término técnico sin definirlo primero con una analogía cotidiana.",
+    "Estándar": "Explica para un adulto sin formación en estadística, pero introduce "
+                "los términos técnicos correctos (media, correlación, etc.) definiéndolos.",
+    "Técnico": "Explica asumiendo que el usuario ya conoce los conceptos básicos de "
+               "estadística. Usa terminología precisa y profundiza en el razonamiento.",
+}
+
+SYSTEM_PROMPT_BASE = """
+Eres un tutor de estadística que le enseña a leer un dashboard de monitoreo ambiental.
 
 Cuando te den el contexto de un gráfico (qué variable es, qué tipo de gráfico, y sus
-estadísticos), responde SIEMPRE con esta estructura, en español, breve (máximo 180 palabras):
+estadísticos), responde SIEMPRE con esta estructura:
 
 1. Qué significa cada número que te dieron, en lenguaje simple y con una analogía si ayuda.
 2. Cómo se ve eso reflejado en el gráfico (qué debería notar al mirarlo).
 3. Una pista práctica de cómo reconocer este mismo patrón en otro dashboard en el futuro.
 
-No inventes números que no te dieron. No uses jerga sin explicarla. Si la pregunta no
-tiene que ver con estadística o con el dashboard, responde igual con amabilidad pero
-redirige a temas del dashboard.
+No inventes números que no te dieron. Si la pregunta no tiene que ver con estadística o
+con el dashboard, responde igual con amabilidad pero redirige a temas del dashboard.
 """
 
 
@@ -59,19 +83,26 @@ cliente_ia = obtener_cliente_ia()
 
 
 def preguntar_ia(pregunta: str, contexto: str = "") -> str:
-    """Envía una pregunta a Groq con el contexto numérico del gráfico. Nunca lanza error al usuario."""
+    """
+    Envía una pregunta a Groq con el contexto numérico del gráfico.
+    Lee el modelo y los parámetros elegidos en el panel lateral
+    (variables globales modelo_sel, temperatura_sel, max_tokens_sel, nivel_sel).
+    Nunca lanza error al usuario.
+    """
     if cliente_ia is None:
         return ("⚠️ No hay una clave de API configurada. Crea un archivo `.env` con "
                 "`GEMINI_API_KEY=tu_clave_de_groq` (ver instrucciones al final del código).")
     try:
+        system_prompt = SYSTEM_PROMPT_BASE + "\n\n" + NIVEL_INSTRUCCIONES[nivel_sel] + \
+            f"\n\nResponde en máximo {max_tokens_sel // 3} palabras aproximadamente."
         respuesta = cliente_ia.chat.completions.create(
-            model=MODELO_IA,
+            model=modelo_sel,
             messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": f"Contexto de los datos:\n{contexto}\n\nPregunta:\n{pregunta}"},
             ],
-            temperature=0.3,
-            max_tokens=400,
+            temperature=temperatura_sel,
+            max_tokens=max_tokens_sel,
         )
         return respuesta.choices[0].message.content
     except Exception as e:
@@ -81,7 +112,7 @@ def preguntar_ia(pregunta: str, contexto: str = "") -> str:
 def boton_explicar(clave: str, pregunta: str, contexto: str):
     """Botón reutilizable: al presionarlo, pide a la IA que explique el gráfico de arriba."""
     if st.button("🤖 Pídele al tutor de IA que te explique este gráfico", key=clave):
-        with st.spinner("El tutor está leyendo los números del gráfico..."):
+        with st.spinner(f"Consultando a {MODELOS[modelo_sel]['etiqueta']}..."):
             respuesta = preguntar_ia(pregunta, contexto)
         with st.chat_message("assistant"):
             st.markdown(respuesta)
@@ -106,8 +137,71 @@ def cargar():
 
     return df
 
-df = cargar()
+df_completo = cargar()
 NUMERICAS = ["PM2_5_Ug_m3", "Temperatura_C", "Humedad_Relativa_Pct", "Nivel_Ruido_dB"]
+
+
+# =============================================================
+# PANEL LATERAL — FILTROS DE DATOS Y CONFIGURACIÓN DEL TUTOR
+# =============================================================
+st.sidebar.header("⚙️ Panel de control")
+
+st.sidebar.subheader("📊 Filtros de datos")
+
+ciudades_sel = st.sidebar.multiselect(
+    "Ciudad", sorted(df_completo["Ciudad"].unique()),
+    default=sorted(df_completo["Ciudad"].unique()),
+)
+zonas_sel = st.sidebar.multiselect(
+    "Tipo de zona", sorted(df_completo["Tipo_Zona"].unique()),
+    default=sorted(df_completo["Tipo_Zona"].unique()),
+)
+lluvia_sel = st.sidebar.radio("Lluvia", ["Todas", "Con lluvia", "Sin lluvia"], horizontal=True)
+horas_sel = st.sidebar.slider("Rango de horas del día", 0, 23, (0, 23))
+
+df = df_completo[
+    df_completo["Ciudad"].isin(ciudades_sel)
+    & df_completo["Tipo_Zona"].isin(zonas_sel)
+    & df_completo["Hora"].between(*horas_sel)
+]
+if lluvia_sel == "Con lluvia":
+    df = df[df["Presencia_Lluvia"]]
+elif lluvia_sel == "Sin lluvia":
+    df = df[~df["Presencia_Lluvia"]]
+
+st.sidebar.metric("Registros seleccionados", f"{len(df)} de {len(df_completo)}")
+
+if df.empty:
+    st.sidebar.error("Ningún registro cumple estos filtros. Amplía la selección.")
+    st.error("No hay datos que mostrar con los filtros actuales. Ajusta el panel lateral.")
+    st.stop()
+
+st.sidebar.divider()
+st.sidebar.subheader("🤖 Configuración del tutor de IA")
+
+modelo_sel = st.sidebar.selectbox(
+    "Modelo", list(MODELOS.keys()), format_func=lambda m: MODELOS[m]["etiqueta"],
+)
+st.sidebar.caption(f"Capa gratuita: {MODELOS[modelo_sel]['rpd']}")
+
+temperatura_sel = st.sidebar.slider(
+    "Temperatura (creatividad)", 0.0, 1.0, 0.3, 0.1,
+    help="Baja = respuestas consistentes y literales. Alta = respuestas más variadas, "
+         "menos predecibles.",
+)
+max_tokens_sel = st.sidebar.slider(
+    "Longitud máxima de respuesta", 100, 800, 400, 50,
+    help="En tokens (fragmentos de palabra). Más alto = respuestas más largas y detalladas, "
+         "pero más lentas.",
+)
+nivel_sel = st.sidebar.select_slider(
+    "Nivel de explicación", options=["Muy simple", "Estándar", "Técnico"], value="Estándar",
+)
+
+st.sidebar.divider()
+if st.sidebar.button("🗑️ Borrar historial del chat"):
+    st.session_state.chat = []
+    st.rerun()
 
 
 # =============================================================
@@ -115,10 +209,10 @@ NUMERICAS = ["PM2_5_Ug_m3", "Temperatura_C", "Humedad_Relativa_Pct", "Nivel_Ruid
 # =============================================================
 st.title("Monitoreo ambiental urbano")
 st.write(
-    "Este dashboard analiza 500 lecturas tomadas por sensores ambientales en cinco "
-    "ciudades colombianas. Cada sección explica qué mide un gráfico, por qué se eligió "
-    "ese tipo y no otro, y cómo interpretarlo. Además, puedes pedirle a un **tutor de "
-    "IA** que te explique cualquier gráfico con los números reales que estás viendo."
+    "Este dashboard analiza lecturas de sensores ambientales en cinco ciudades "
+    "colombianas. Cada sección explica qué mide un gráfico, por qué se eligió ese tipo "
+    "y no otro, y cómo interpretarlo. Usa el panel lateral para filtrar los datos y "
+    "ajustar el tutor de IA que explica cada gráfico."
 )
 
 if cliente_ia is None:
@@ -128,7 +222,7 @@ if cliente_ia is None:
     )
 
 c1, c2, c3, c4 = st.columns(4)
-c1.metric("Lecturas", df.shape[0])
+c1.metric("Lecturas filtradas", df.shape[0])
 c2.metric("Ciudades", df["Ciudad"].nunique())
 c3.metric("Variables", df.shape[1])
 c4.metric("Sensores únicos", df["ID_Sensor"].nunique())
@@ -587,7 +681,9 @@ st.markdown("""
 5. **Patrón horario:** no se detecta un ciclo circadiano consistente.
 
 **Conclusión general:** el valor de este análisis no está en encontrar una relación
-—no la hay— sino en demostrarlo con evidencia estadística concreta.
+—no la hay— sino en demostrarlo con evidencia estadística concreta. Ten en cuenta que
+estas conclusiones se recalculan sobre los datos que dejaste activos en el panel lateral;
+si filtraste por una sola ciudad o zona, vuelve a leerlas con ese contexto.
 """)
 
 
@@ -596,9 +692,10 @@ st.markdown("""
 # =============================================================
 st.header("9. Tutor de estadística — pregunta lo que quieras")
 st.write(
-    "Este chat conoce el contexto general del dataset (no memoriza cada gráfico que "
-    "viste arriba). Úsalo para dudas conceptuales: '¿qué es una desviación estándar?', "
-    "'¿por qué el promedio y la mediana pueden ser distintos?', etc."
+    f"Usando **{MODELOS[modelo_sel]['etiqueta']}**, temperatura {temperatura_sel} y "
+    f"nivel de explicación **{nivel_sel}** (ajustables en el panel lateral). "
+    "Este chat conoce el contexto general del dataset filtrado, no cada gráfico que "
+    "viste arriba. Úsalo para dudas conceptuales."
 )
 
 if "chat" not in st.session_state:
@@ -615,8 +712,9 @@ if pregunta_libre:
         st.markdown(pregunta_libre)
 
     contexto_general = (
-        f"Dataset de monitoreo ambiental, {df.shape[0]} lecturas, columnas: "
-        f"{', '.join(df.columns)}. Hallazgo principal: no hay correlaciones fuertes "
+        f"Dataset de monitoreo ambiental filtrado a {len(df)} de {len(df_completo)} lecturas "
+        f"(ciudades: {', '.join(ciudades_sel)}; zonas: {', '.join(zonas_sel)}; lluvia: {lluvia_sel}). "
+        f"Columnas: {', '.join(df.columns)}. Hallazgo principal: no hay correlaciones fuertes "
         "entre variables, ni diferencias claras entre grupos, y la etiqueta ICA es "
         "incoherente con el PM2.5 medido."
     )
@@ -639,3 +737,5 @@ if pregunta_libre:
 # 3. En Streamlit Community Cloud ya tienes configurado el secreto
 #    GEMINI_API_KEY, así que no necesitas hacer nada adicional ahí:
 #    el código lo detecta automáticamente al desplegar.
+# 4. Los modelos llama-3.1-8b-instant y llama-3.3-70b-versatile de Groq
+#    se apagan el 16 de agosto de 2026, por eso no aparecen en el panel.
