@@ -1,6 +1,6 @@
 # =============================================================
 #  ANÁLISIS DE MONITOREO AMBIENTAL
-#  Dashboard didáctico + tutor de IA (Gemini) que interpreta
+#  Dashboard didáctico + tutor de IA (Groq) que interpreta
 #  cada gráfico y responde preguntas de estadística.
 #
 #  Para ejecutar, en la terminal:  streamlit run app.py
@@ -13,23 +13,23 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import plotly.express as px
 from dotenv import load_dotenv
-from google import genai
-from google.genai import types
+from groq import Groq
 
 st.set_page_config(page_title="Monitoreo Ambiental", layout="wide")
 
 
 # =============================================================
-# CONFIGURACIÓN DEL TUTOR DE IA (Gemini)
+# CONFIGURACIÓN DEL TUTOR DE IA (Groq)
 # =============================================================
 load_dotenv()  # lee GEMINI_API_KEY desde el archivo .env en local
 
 # Orden de búsqueda de la clave: primero variable de entorno / .env
 # (uso local), y si no existe, st.secrets (uso en Streamlit Cloud).
-# Así el mismo código funciona en ambos entornos sin tocarlo.
+# Nota: la variable se llama GEMINI_API_KEY por convención previa del
+# proyecto, pero aquí guarda una clave de Groq, no de Google.
 API_KEY = os.getenv("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY", None)
 
-MODELO_IA = "gemini-2.5-flash"  # modelo con capa gratuita, buena relación calidad/costo
+MODELO_IA = "llama-3.3-70b-versatile"  # buen balance calidad/velocidad en la capa gratuita de Groq
 
 SYSTEM_PROMPT = """
 Eres un tutor de estadística que le enseña a un principiante total a leer un dashboard
@@ -50,30 +50,30 @@ redirige a temas del dashboard.
 
 @st.cache_resource
 def obtener_cliente_ia():
-    """Crea el cliente de Gemini una sola vez. None si no hay clave configurada."""
+    """Crea el cliente de Groq una sola vez. None si no hay clave configurada."""
     if not API_KEY:
         return None
-    return genai.Client(api_key=API_KEY)
+    return Groq(api_key=API_KEY)
 
 cliente_ia = obtener_cliente_ia()
 
 
 def preguntar_ia(pregunta: str, contexto: str = "") -> str:
-    """Envía una pregunta a Gemini con el contexto numérico del gráfico. Nunca lanza error al usuario."""
+    """Envía una pregunta a Groq con el contexto numérico del gráfico. Nunca lanza error al usuario."""
     if cliente_ia is None:
         return ("⚠️ No hay una clave de API configurada. Crea un archivo `.env` con "
-                "`GEMINI_API_KEY=tu_clave` (ver instrucciones al final del código).")
+                "`GEMINI_API_KEY=tu_clave_de_groq` (ver instrucciones al final del código).")
     try:
-        respuesta = cliente_ia.models.generate_content(
+        respuesta = cliente_ia.chat.completions.create(
             model=MODELO_IA,
-            contents=f"Contexto de los datos:\n{contexto}\n\nPregunta:\n{pregunta}",
-            config=types.GenerateContentConfig(
-                system_instruction=SYSTEM_PROMPT,
-                temperature=0.3,
-                max_output_tokens=400,
-            ),
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": f"Contexto de los datos:\n{contexto}\n\nPregunta:\n{pregunta}"},
+            ],
+            temperature=0.3,
+            max_tokens=400,
         )
-        return respuesta.text
+        return respuesta.choices[0].message.content
     except Exception as e:
         return f"⚠️ No se pudo consultar la IA en este momento. Detalle: {e}"
 
@@ -631,11 +631,11 @@ if pregunta_libre:
 # NOTAS DE CONFIGURACIÓN (no se muestran en el dashboard)
 # =============================================================
 # 1. Crea un archivo llamado ".env" en esta misma carpeta con una línea:
-#      GEMINI_API_KEY=tu_clave_aqui
+#      GEMINI_API_KEY=tu_clave_de_groq_aqui
+#    (el nombre de la variable quedó así por convención previa del
+#    proyecto; el valor es una clave de console.groq.com, no de Google)
 # 2. Instala las dependencias nuevas:
-#      pip install google-genai python-dotenv
-# 3. Para desplegar en Streamlit Community Cloud, NO subas el .env al
-#    repositorio. En su lugar, configura la misma variable en
-#    "Manage app" → "Settings" → "Secrets" con formato TOML:
-#      GEMINI_API_KEY = "tu_clave_aqui"
-#    El código ya busca la clave en ambos lugares automáticamente.
+#      pip install groq python-dotenv
+# 3. En Streamlit Community Cloud ya tienes configurado el secreto
+#    GEMINI_API_KEY, así que no necesitas hacer nada adicional ahí:
+#    el código lo detecta automáticamente al desplegar.
